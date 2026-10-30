@@ -1,0 +1,1893 @@
+diff --git a/docs/export-format.md b/docs/export-format.md
+index c066ff3..a9510a5 100644
+--- a/docs/export-format.md
++++ b/docs/export-format.md
+@@ -246,13 +246,17 @@ keeps its own goals. Those older builds ignore the file when they meet it.
+     "dinner": 30,
+     "snack": 10
+   },
+-  "dailyWaterGoalMl": 2600          // 100..10000
++  "dailyWaterGoalMl": 2600,         // 100..10000
++  "carbGoalGrams": 220.0,           // custom daily macro goals in grams,
++  "proteinGoalGrams": 160.0,        //   0..2000 each: all three set, or all
++  "fatGoalGrams": 70.0              //   three null (calculated goals)
+ }
+ ```
+ 
+ `null`, or a missing key, means the app default — no kcal adjustment, the
+ 60 / 15 / 25 carbs / protein / fat split, the 30 / 40 / 20 / 10 meal shares,
+-the water goal seeded from the profile — and importing it puts that goal back
++the water goal seeded from the profile, macro goals calculated from the kcal
++goal — and importing it puts that goal back
+ to the default. A file with a value outside the ranges above, or a number
+ that is not finite, is rejected, and
+ the whole zip with it, before anything on the device changes. The tolerances
+diff --git a/lib/core/data/data_source/config_data_source.dart b/lib/core/data/data_source/config_data_source.dart
+index 8d8344f..abd78c8 100644
+--- a/lib/core/data/data_source/config_data_source.dart
++++ b/lib/core/data/data_source/config_data_source.dart
+@@ -56,6 +56,9 @@ class ConfigDataSource {
+       merged.userCarbGoalPct = profile.userCarbGoalPct;
+       merged.userProteinGoalPct = profile.userProteinGoalPct;
+       merged.userFatGoalPct = profile.userFatGoalPct;
++      merged.userCarbGoalGrams = profile.userCarbGoalGrams;
++      merged.userProteinGoalGrams = profile.userProteinGoalGrams;
++      merged.userFatGoalGrams = profile.userFatGoalGrams;
+       merged.mealKcalSharesPct = profile.mealKcalSharesPct;
+       merged.dailyWaterGoalMl = profile.dailyWaterGoalMl;
+       merged.healthImportEnabled = profile.healthImportEnabled;
+@@ -73,6 +76,9 @@ class ConfigDataSource {
+       merged.userCarbGoalPct = null;
+       merged.userProteinGoalPct = null;
+       merged.userFatGoalPct = null;
++      merged.userCarbGoalGrams = null;
++      merged.userProteinGoalGrams = null;
++      merged.userFatGoalGrams = null;
+       merged.mealKcalSharesPct = null;
+       merged.dailyWaterGoalMl = null;
+       merged.healthImportEnabled = null;
+@@ -212,6 +218,21 @@ class ConfigDataSource {
+     await _update((c) => c.userFatGoalPct = fatGoalPct);
+   }
+ 
++  /// Stores the custom daily macro goals in grams, all three in one write.
++  /// Passing nulls switches the custom goals off again, so the macros are
++  /// calculated from the kcal goal and the split as before.
++  Future<void> setConfigMacroGoalGrams({
++    required double? carbGrams,
++    required double? proteinGrams,
++    required double? fatGrams,
++  }) async {
++    await _update((c) {
++      c.userCarbGoalGrams = carbGrams;
++      c.userProteinGoalGrams = proteinGrams;
++      c.userFatGoalGrams = fatGrams;
++    });
++  }
++
+   Future<void> setConfigShowActivityTracking(bool show) async {
+     await _update((c) => c.showActivityTracking = show);
+   }
+@@ -353,6 +374,9 @@ class ConfigDataSource {
+     required double? fatGoalPct,
+     required Map<String, int>? mealKcalSharesPct,
+     required int? dailyWaterGoalMl,
++    double? carbGoalGrams,
++    double? proteinGoalGrams,
++    double? fatGoalGrams,
+   }) async {
+     await _update((c) {
+       c.userKcalAdjustment = kcalAdjustment;
+@@ -363,6 +387,9 @@ class ConfigDataSource {
+           ? null
+           : Map<String, int>.from(mealKcalSharesPct);
+       c.dailyWaterGoalMl = dailyWaterGoalMl;
++      c.userCarbGoalGrams = carbGoalGrams;
++      c.userProteinGoalGrams = proteinGoalGrams;
++      c.userFatGoalGrams = fatGoalGrams;
+     });
+   }
+ 
+diff --git a/lib/core/data/dbo/config_dbo.dart b/lib/core/data/dbo/config_dbo.dart
+index d4f7771..0faf3e8 100644
+--- a/lib/core/data/dbo/config_dbo.dart
++++ b/lib/core/data/dbo/config_dbo.dart
+@@ -212,6 +212,18 @@ class ConfigDBO extends HiveObject {
+   // about the device.
+   @HiveField(41)
+   bool? localeSyncSeeded;
++  // Custom daily macro goals in grams, entered directly by the user instead
++  // of being derived from the calculated kcal goal and the macro split. Set
++  // together or not at all: all three non-null means the custom goals are
++  // on, and the daily kcal goal becomes the energy they add up to (see
++  // `ConfigEntity.hasCustomMacroGoals`). Null means "calculate them", which
++  // is every install that predates the fields. Per-profile, like the split.
++  @HiveField(42)
++  double? userCarbGoalGrams;
++  @HiveField(43)
++  double? userProteinGoalGrams;
++  @HiveField(44)
++  double? userFatGoalGrams;
+ 
+   ConfigDBO(
+     this.hasAcceptedDisclaimer,
+@@ -253,6 +265,9 @@ class ConfigDBO extends HiveObject {
+     this.defaultToRawFoodUnits,
+     this.trackedDaysOffsetMinutes,
+     this.localeSyncSeeded,
++    this.userCarbGoalGrams,
++    this.userProteinGoalGrams,
++    this.userFatGoalGrams,
+   });
+ 
+   factory ConfigDBO.empty() =>
+diff --git a/lib/core/data/dbo/config_dbo.g.dart b/lib/core/data/dbo/config_dbo.g.dart
+index b8a0182..5acb589 100644
+--- a/lib/core/data/dbo/config_dbo.g.dart
++++ b/lib/core/data/dbo/config_dbo.g.dart
+@@ -56,6 +56,9 @@ class ConfigDBOAdapter extends TypeAdapter<ConfigDBO> {
+         defaultToRawFoodUnits: fields[39] as bool?,
+         trackedDaysOffsetMinutes: (fields[40] as num?)?.toInt(),
+         localeSyncSeeded: fields[41] as bool?,
++        userCarbGoalGrams: (fields[42] as num?)?.toDouble(),
++        userProteinGoalGrams: (fields[43] as num?)?.toDouble(),
++        userFatGoalGrams: (fields[44] as num?)?.toDouble(),
+       )
+       ..userCarbGoalPct = (fields[6] as num?)?.toDouble()
+       ..userProteinGoalPct = (fields[7] as num?)?.toDouble()
+@@ -65,7 +68,7 @@ class ConfigDBOAdapter extends TypeAdapter<ConfigDBO> {
+   @override
+   void write(BinaryWriter writer, ConfigDBO obj) {
+     writer
+-      ..writeByte(42)
++      ..writeByte(45)
+       ..writeByte(0)
+       ..write(obj.hasAcceptedDisclaimer)
+       ..writeByte(1)
+@@ -149,7 +152,13 @@ class ConfigDBOAdapter extends TypeAdapter<ConfigDBO> {
+       ..writeByte(40)
+       ..write(obj.trackedDaysOffsetMinutes)
+       ..writeByte(41)
+-      ..write(obj.localeSyncSeeded);
++      ..write(obj.localeSyncSeeded)
++      ..writeByte(42)
++      ..write(obj.userCarbGoalGrams)
++      ..writeByte(43)
++      ..write(obj.userProteinGoalGrams)
++      ..writeByte(44)
++      ..write(obj.userFatGoalGrams);
+   }
+ 
+   @override
+@@ -227,6 +236,10 @@ ConfigDBO _$ConfigDBOFromJson(Map<String, dynamic> json) =>
+         trackedDaysOffsetMinutes: (json['trackedDaysOffsetMinutes'] as num?)
+             ?.toInt(),
+         localeSyncSeeded: json['localeSyncSeeded'] as bool?,
++        userCarbGoalGrams: (json['userCarbGoalGrams'] as num?)?.toDouble(),
++        userProteinGoalGrams: (json['userProteinGoalGrams'] as num?)
++            ?.toDouble(),
++        userFatGoalGrams: (json['userFatGoalGrams'] as num?)?.toDouble(),
+       )
+       ..userCarbGoalPct = (json['userCarbGoalPct'] as num?)?.toDouble()
+       ..userProteinGoalPct = (json['userProteinGoalPct'] as num?)?.toDouble()
+@@ -277,6 +290,9 @@ Map<String, dynamic> _$ConfigDBOToJson(ConfigDBO instance) => <String, dynamic>{
+   'defaultToRawFoodUnits': instance.defaultToRawFoodUnits,
+   'trackedDaysOffsetMinutes': instance.trackedDaysOffsetMinutes,
+   'localeSyncSeeded': instance.localeSyncSeeded,
++  'userCarbGoalGrams': instance.userCarbGoalGrams,
++  'userProteinGoalGrams': instance.userProteinGoalGrams,
++  'userFatGoalGrams': instance.userFatGoalGrams,
+ };
+ 
+ const _$AppThemeDBOEnumMap = {
+diff --git a/lib/core/data/repository/config_repository.dart b/lib/core/data/repository/config_repository.dart
+index 3644566..66aa82d 100644
+--- a/lib/core/data/repository/config_repository.dart
++++ b/lib/core/data/repository/config_repository.dart
+@@ -98,6 +98,18 @@ class ConfigRepository {
+     await _configDataSource.setConfigFatGoalPct(fat);
+   }
+ 
++  Future<void> setConfigMacroGoalGrams({
++    required double? carbGrams,
++    required double? proteinGrams,
++    required double? fatGrams,
++  }) async {
++    await _configDataSource.setConfigMacroGoalGrams(
++      carbGrams: carbGrams,
++      proteinGrams: proteinGrams,
++      fatGrams: fatGrams,
++    );
++  }
++
+   Future<void> setConfigGoalSettings({
+     required double? kcalAdjustment,
+     required double? carbGoalPct,
+@@ -105,6 +117,9 @@ class ConfigRepository {
+     required double? fatGoalPct,
+     required Map<String, int>? mealKcalSharesPct,
+     required int? dailyWaterGoalMl,
++    double? carbGoalGrams,
++    double? proteinGoalGrams,
++    double? fatGoalGrams,
+   }) async {
+     await _configDataSource.setConfigGoalSettings(
+       kcalAdjustment: kcalAdjustment,
+@@ -113,6 +128,9 @@ class ConfigRepository {
+       fatGoalPct: fatGoalPct,
+       mealKcalSharesPct: mealKcalSharesPct,
+       dailyWaterGoalMl: dailyWaterGoalMl,
++      carbGoalGrams: carbGoalGrams,
++      proteinGoalGrams: proteinGoalGrams,
++      fatGoalGrams: fatGoalGrams,
+     );
+   }
+ 
+diff --git a/lib/core/domain/entity/config_entity.dart b/lib/core/domain/entity/config_entity.dart
+index 61fe7b3..8055419 100644
+--- a/lib/core/domain/entity/config_entity.dart
++++ b/lib/core/domain/entity/config_entity.dart
+@@ -4,6 +4,7 @@ import 'package:opennutritracker/core/domain/entity/app_theme_entity.dart';
+ import 'package:opennutritracker/core/domain/entity/body_weight_unit_entity.dart';
+ import 'package:opennutritracker/core/domain/entity/calories_profile_entity.dart';
+ import 'package:opennutritracker/core/domain/entity/user_gender_entity.dart';
++import 'package:opennutritracker/core/utils/calc/macro_calc.dart';
+ 
+ class ConfigEntity extends Equatable {
+   // #150: keys for the per-meal kcal share map. Kept as plain strings rather
+@@ -40,6 +41,10 @@ class ConfigEntity extends Equatable {
+   final double? userCarbGoalPct;
+   final double? userProteinGoalPct;
+   final double? userFatGoalPct;
++  // Custom daily macro goals in grams (see [hasCustomMacroGoals]).
++  final double? userCarbGoalGrams;
++  final double? userProteinGoalGrams;
++  final double? userFatGoalGrams;
+   final bool showActivityTracking;
+   final bool showMealMacros;
+   final bool notificationsEnabled;
+@@ -243,6 +248,9 @@ class ConfigEntity extends Equatable {
+     this.userCarbGoalPct,
+     this.userProteinGoalPct,
+     this.userFatGoalPct,
++    this.userCarbGoalGrams,
++    this.userProteinGoalGrams,
++    this.userFatGoalGrams,
+     this.showActivityTracking = true,
+     this.showMealMacros = true,
+     this.notificationsEnabled = false,
+@@ -336,6 +344,31 @@ class ConfigEntity extends Equatable {
+   int get dayStartOffsetTotalMinutes =>
+       dayStartOffsetHours * 60 + dayStartOffsetMinutes;
+ 
++  /// Whether the user has set their own daily macro goals in grams. Only
++  /// when all three are stored, none is negative and together they provide
++  /// some energy — anything else reads as off, so a half-written or corrupt
++  /// value falls back to the calculated goals instead of a zero kcal goal.
++  bool get hasCustomMacroGoals {
++    final grams = [userCarbGoalGrams, userProteinGoalGrams, userFatGoalGrams];
++    if (grams.any((g) => g == null || !g.isFinite || g < 0)) return false;
++    return customMacroGoalsKcal! > 0;
++  }
++
++  /// The energy the custom macro goals add up to, or null when unset. While
++  /// [hasCustomMacroGoals] is true this replaces the calculated base kcal
++  /// goal (TDEE, weight-goal adjustment and manual offset).
++  double? get customMacroGoalsKcal {
++    final carbs = userCarbGoalGrams;
++    final protein = userProteinGoalGrams;
++    final fat = userFatGoalGrams;
++    if (carbs == null || protein == null || fat == null) return null;
++    return MacroCalc.getKcalFromMacroGrams(
++      carbsGrams: carbs,
++      fatsGrams: fat,
++      proteinsGrams: protein,
++    );
++  }
++
+   factory ConfigEntity.fromConfigDBO(ConfigDBO dbo) => ConfigEntity(
+     dbo.hasAcceptedDisclaimer,
+     dbo.hasAcceptedPolicy,
+@@ -355,6 +388,9 @@ class ConfigEntity extends Equatable {
+     userCarbGoalPct: dbo.userCarbGoalPct,
+     userProteinGoalPct: dbo.userProteinGoalPct,
+     userFatGoalPct: dbo.userFatGoalPct,
++    userCarbGoalGrams: dbo.userCarbGoalGrams,
++    userProteinGoalGrams: dbo.userProteinGoalGrams,
++    userFatGoalGrams: dbo.userFatGoalGrams,
+     showActivityTracking: dbo.showActivityTracking ?? true,
+     showMealMacros: dbo.showMealMacros ?? true,
+     notificationsEnabled: dbo.notificationsEnabled ?? false,
+@@ -470,6 +506,9 @@ class ConfigEntity extends Equatable {
+     userCarbGoalPct,
+     userProteinGoalPct,
+     userFatGoalPct,
++    userCarbGoalGrams,
++    userProteinGoalGrams,
++    userFatGoalGrams,
+     showActivityTracking,
+     showMealMacros,
+     notificationsEnabled,
+diff --git a/lib/core/domain/entity/kcal_goal_breakdown_entity.dart b/lib/core/domain/entity/kcal_goal_breakdown_entity.dart
+index 0325b13..700893c 100644
+--- a/lib/core/domain/entity/kcal_goal_breakdown_entity.dart
++++ b/lib/core/domain/entity/kcal_goal_breakdown_entity.dart
+@@ -70,6 +70,13 @@ class KcalGoalBreakdownEntity extends Equatable {
+   final double fatsGoalGrams;
+   final double proteinsGoalGrams;
+ 
++  /// The energy of the user's own macro goals in grams, or null when the
++  /// goals are calculated. When set it replaces steps 1–3: [totalKcalGoal]
++  /// is this plus [activityKcal], and the gram goals are the custom grams
++  /// plus the default split of the activity kcal — the same values
++  /// [GetKcalGoalUsecase] and [GetMacroGoalUsecase] return.
++  final double? customMacroGoalsKcal;
++
+   const KcalGoalBreakdownEntity({
+     required this.age,
+     required this.heightCM,
+@@ -98,8 +105,13 @@ class KcalGoalBreakdownEntity extends Equatable {
+     required this.carbsGoalGrams,
+     required this.fatsGoalGrams,
+     required this.proteinsGoalGrams,
++    this.customMacroGoalsKcal,
+   });
+ 
++  /// Whether the goal comes from the user's custom macro grams rather than
++  /// from the TDEE calculation.
++  bool get usesCustomMacroGoals => customMacroGoalsKcal != null;
++
+   /// Whether the taper actually changed the adjustment for this snapshot.
+   bool get taperChangedAdjustment =>
+       taperEnabled && baseAdjustmentKcal != effectiveAdjustmentKcal;
+@@ -115,6 +127,9 @@ class KcalGoalBreakdownEntity extends Equatable {
+     double? userCarbsGoalPct,
+     double? userFatsGoalPct,
+     double? userProteinsGoalPct,
++    double? customCarbsGoalGrams,
++    double? customFatsGoalGrams,
++    double? customProteinsGoalGrams,
+   }) {
+     final palValue = PalCalc.getPALValueFromActivityCategory(user);
+ 
+@@ -174,25 +189,50 @@ class KcalGoalBreakdownEntity extends Equatable {
+       taperEnabled: user.caloriesTaperEnabled,
+     );
+ 
+-    final totalGoal = CalorieGoalCalc.getTotalKcalGoal(
+-      user,
+-      totalKcalActivities,
+-      kcalUserAdjustment: userKcalAdjustment,
+-      caloriesTaperEnabled: user.caloriesTaperEnabled,
+-    );
++    final customCarbs = customCarbsGoalGrams;
++    final customFats = customFatsGoalGrams;
++    final customProteins = customProteinsGoalGrams;
++    final usesCustom =
++        customCarbs != null && customFats != null && customProteins != null;
++    final customKcal = usesCustom
++        ? MacroCalc.getKcalFromMacroGrams(
++            carbsGrams: customCarbs,
++            fatsGrams: customFats,
++            proteinsGrams: customProteins,
++          )
++        : null;
+ 
+-    final carbsGrams = MacroCalc.getTotalCarbsGoal(
+-      totalGoal,
+-      userCarbsGoal: userCarbsGoalPct,
+-    );
+-    final fatsGrams = MacroCalc.getTotalFatsGoal(
+-      totalGoal,
+-      userFatsGoal: userFatsGoalPct,
+-    );
+-    final proteinsGrams = MacroCalc.getTotalProteinsGoal(
+-      totalGoal,
+-      userProteinsGoal: userProteinsGoalPct,
+-    );
++    final double totalGoal;
++    final double carbsGrams;
++    final double fatsGrams;
++    final double proteinsGrams;
++    if (usesCustom) {
++      totalGoal = customKcal! + totalKcalActivities;
++      carbsGrams =
++          customCarbs + MacroCalc.getTotalCarbsGoal(totalKcalActivities);
++      fatsGrams = customFats + MacroCalc.getTotalFatsGoal(totalKcalActivities);
++      proteinsGrams =
++          customProteins + MacroCalc.getTotalProteinsGoal(totalKcalActivities);
++    } else {
++      totalGoal = CalorieGoalCalc.getTotalKcalGoal(
++        user,
++        totalKcalActivities,
++        kcalUserAdjustment: userKcalAdjustment,
++        caloriesTaperEnabled: user.caloriesTaperEnabled,
++      );
++      carbsGrams = MacroCalc.getTotalCarbsGoal(
++        totalGoal,
++        userCarbsGoal: userCarbsGoalPct,
++      );
++      fatsGrams = MacroCalc.getTotalFatsGoal(
++        totalGoal,
++        userFatsGoal: userFatsGoalPct,
++      );
++      proteinsGrams = MacroCalc.getTotalProteinsGoal(
++        totalGoal,
++        userProteinsGoal: userProteinsGoalPct,
++      );
++    }
+ 
+     return KcalGoalBreakdownEntity(
+       age: user.age,
+@@ -216,16 +256,32 @@ class KcalGoalBreakdownEntity extends Equatable {
+       manualKcalAdjustment: userKcalAdjustment ?? 0,
+       activityKcal: totalKcalActivities,
+       totalKcalGoal: totalGoal,
+-      carbsFractionGoal: userCarbsGoalPct ?? MacroCalc.defaultCarbsPercentageGoal,
+-      fatsFractionGoal: userFatsGoalPct ?? MacroCalc.defaultFatsPercentageGoal,
+-      proteinsFractionGoal:
+-          userProteinsGoalPct ?? MacroCalc.defaultProteinsPercentageGoal,
++      carbsFractionGoal: usesCustom
++          ? _fractionOf(carbsGrams, MacroCalc.carbsKcalPerGram, totalGoal)
++          : userCarbsGoalPct ?? MacroCalc.defaultCarbsPercentageGoal,
++      fatsFractionGoal: usesCustom
++          ? _fractionOf(fatsGrams, MacroCalc.fatKcalPerGram, totalGoal)
++          : userFatsGoalPct ?? MacroCalc.defaultFatsPercentageGoal,
++      proteinsFractionGoal: usesCustom
++          ? _fractionOf(proteinsGrams, MacroCalc.proteinKcalPerGram, totalGoal)
++          : userProteinsGoalPct ?? MacroCalc.defaultProteinsPercentageGoal,
+       carbsGoalGrams: carbsGrams,
+       fatsGoalGrams: fatsGrams,
+       proteinsGoalGrams: proteinsGrams,
++      customMacroGoalsKcal: customKcal,
+     );
+   }
+ 
++  /// Share of [totalKcal] that [grams] of a macro at [kcalPerGram] provide.
++  static double _fractionOf(
++    double grams,
++    double kcalPerGram,
++    double totalKcal,
++  ) {
++    if (totalKcal <= 0) return 0;
++    return grams * kcalPerGram / totalKcal;
++  }
++
+   @override
+   List<Object?> get props => [
+     age,
+@@ -255,5 +311,6 @@ class KcalGoalBreakdownEntity extends Equatable {
+     carbsGoalGrams,
+     fatsGoalGrams,
+     proteinsGoalGrams,
++    customMacroGoalsKcal,
+   ];
+ }
+diff --git a/lib/core/domain/usecase/add_config_usecase.dart b/lib/core/domain/usecase/add_config_usecase.dart
+index 21b33cf..76ef2a9 100644
+--- a/lib/core/domain/usecase/add_config_usecase.dart
++++ b/lib/core/domain/usecase/add_config_usecase.dart
+@@ -68,6 +68,19 @@ class AddConfigUsecase {
+     );
+   }
+ 
++  /// Custom daily macro goals in grams; nulls switch them off.
++  Future<void> setConfigMacroGoalGrams({
++    required double? carbGrams,
++    required double? proteinGrams,
++    required double? fatGrams,
++  }) async {
++    await _configRepository.setConfigMacroGoalGrams(
++      carbGrams: carbGrams,
++      proteinGrams: proteinGrams,
++      fatGrams: fatGrams,
++    );
++  }
++
+   Future<void> setConfigShowActivityTracking(bool show) async {
+     await _configRepository.setConfigShowActivityTracking(show);
+   }
+diff --git a/lib/core/domain/usecase/get_kcal_goal_breakdown_usecase.dart b/lib/core/domain/usecase/get_kcal_goal_breakdown_usecase.dart
+index f661395..46aafc3 100644
+--- a/lib/core/domain/usecase/get_kcal_goal_breakdown_usecase.dart
++++ b/lib/core/domain/usecase/get_kcal_goal_breakdown_usecase.dart
+@@ -43,6 +43,17 @@ class GetKcalGoalBreakdownUsecase {
+       userCarbsGoalPct: config.userCarbGoalPct,
+       userFatsGoalPct: config.userFatGoalPct,
+       userProteinsGoalPct: config.userProteinGoalPct,
++      // Only passed while they are in effect, the way [GetKcalGoalUsecase]
++      // checks them, so a half-stored set reads as calculated in both.
++      customCarbsGoalGrams: config.hasCustomMacroGoals
++          ? config.userCarbGoalGrams
++          : null,
++      customFatsGoalGrams: config.hasCustomMacroGoals
++          ? config.userFatGoalGrams
++          : null,
++      customProteinsGoalGrams: config.hasCustomMacroGoals
++          ? config.userProteinGoalGrams
++          : null,
+     );
+   }
+ }
+diff --git a/lib/core/domain/usecase/get_kcal_goal_usecase.dart b/lib/core/domain/usecase/get_kcal_goal_usecase.dart
+index 700d0c4..2ac63ae 100644
+--- a/lib/core/domain/usecase/get_kcal_goal_usecase.dart
++++ b/lib/core/domain/usecase/get_kcal_goal_usecase.dart
+@@ -40,6 +40,11 @@ class GetKcalGoalUsecase {
+           dayStartOffsetHours: config.dayStartOffsetHours,
+           dayStartOffsetMinutes: config.dayStartOffsetMinutes,
+         )).map((activity) => activity.burnedKcal).toList().sum;
++    // Custom macro goals in grams replace the calculated base goal: the day's
++    // target is the energy those grams provide, plus activities as usual.
++    if (config.hasCustomMacroGoals) {
++      return config.customMacroGoalsKcal! + totalKcalActivities;
++    }
+     return CalorieGoalCalc.getTotalKcalGoal(
+       user,
+       totalKcalActivities,
+diff --git a/lib/core/domain/usecase/get_macro_goal_usecase.dart b/lib/core/domain/usecase/get_macro_goal_usecase.dart
+index 8500067..14e8c3e 100644
+--- a/lib/core/domain/usecase/get_macro_goal_usecase.dart
++++ b/lib/core/domain/usecase/get_macro_goal_usecase.dart
+@@ -1,4 +1,5 @@
+ import 'package:opennutritracker/core/data/repository/config_repository.dart';
++import 'package:opennutritracker/core/domain/entity/config_entity.dart';
+ import 'package:opennutritracker/core/utils/calc/macro_calc.dart';
+ 
+ class GetMacroGoalUsecase {
+@@ -8,6 +9,12 @@ class GetMacroGoalUsecase {
+ 
+   Future<double> getCarbsGoal(double totalCalorieGoal) async {
+     final config = await _configRepository.getConfig();
++    if (config.hasCustomMacroGoals) {
++      return _withActivityShare(
++        config.userCarbGoalGrams!,
++        MacroCalc.getTotalCarbsGoal(_kcalAboveCustom(config, totalCalorieGoal)),
++      );
++    }
+     final userCarbGoal = config.userCarbGoalPct;
+ 
+     return MacroCalc.getTotalCarbsGoal(
+@@ -18,6 +25,12 @@ class GetMacroGoalUsecase {
+ 
+   Future<double> getFatsGoal(double totalCalorieGoal) async {
+     final config = await _configRepository.getConfig();
++    if (config.hasCustomMacroGoals) {
++      return _withActivityShare(
++        config.userFatGoalGrams!,
++        MacroCalc.getTotalFatsGoal(_kcalAboveCustom(config, totalCalorieGoal)),
++      );
++    }
+     final userFatGoal = config.userFatGoalPct;
+ 
+     return MacroCalc.getTotalFatsGoal(
+@@ -28,6 +41,14 @@ class GetMacroGoalUsecase {
+ 
+   Future<double> getProteinsGoal(double totalCalorieGoal) async {
+     final config = await _configRepository.getConfig();
++    if (config.hasCustomMacroGoals) {
++      return _withActivityShare(
++        config.userProteinGoalGrams!,
++        MacroCalc.getTotalProteinsGoal(
++          _kcalAboveCustom(config, totalCalorieGoal),
++        ),
++      );
++    }
+     final userProteinGoal = config.userProteinGoalPct;
+ 
+     return MacroCalc.getTotalProteinsGoal(
+@@ -35,4 +56,17 @@ class GetMacroGoalUsecase {
+       userProteinsGoal: userProteinGoal,
+     );
+   }
++
++  /// With custom macro goals the kcal goal is the custom grams' energy plus
++  /// the day's activities (see [GetKcalGoalUsecase]). The part above the
++  /// custom energy is split the default way — the same split a logged
++  /// activity adds to a tracked day — so the custom grams stay exactly what
++  /// the user entered on a day without activities.
++  double _kcalAboveCustom(ConfigEntity config, double totalCalorieGoal) =>
++      totalCalorieGoal - config.customMacroGoalsKcal!;
++
++  double _withActivityShare(double customGrams, double activityGrams) {
++    final total = customGrams + activityGrams;
++    return total < 0 ? 0 : total;
++  }
+ }
+diff --git a/lib/core/utils/calc/macro_calc.dart b/lib/core/utils/calc/macro_calc.dart
+index 3c6c9b9..7e0d458 100644
+--- a/lib/core/utils/calc/macro_calc.dart
++++ b/lib/core/utils/calc/macro_calc.dart
+@@ -42,4 +42,16 @@ class MacroCalc {
+       (totalCalorieGoal *
+           (userProteinsGoal ?? defaultProteinsPercentageGoal)) /
+       proteinKcalPerGram;
++
++  /// Energy the given macro grams add up to, using the same densities the
++  /// gram goals are derived with. Used when the user sets their own macro
++  /// goals in grams: the daily kcal goal is then what those grams provide.
++  static double getKcalFromMacroGrams({
++    required double carbsGrams,
++    required double fatsGrams,
++    required double proteinsGrams,
++  }) =>
++      carbsGrams * carbsKcalPerGram +
++      fatsGrams * fatKcalPerGram +
++      proteinsGrams * proteinKcalPerGram;
+ }
+diff --git a/lib/features/settings/domain/goal_settings_backup.dart b/lib/features/settings/domain/goal_settings_backup.dart
+index 4be3d1c..b1ed807 100644
+--- a/lib/features/settings/domain/goal_settings_backup.dart
++++ b/lib/features/settings/domain/goal_settings_backup.dart
+@@ -5,8 +5,8 @@ import 'package:opennutritracker/core/domain/entity/config_entity.dart';
+ /// `goal_settings.json` (#1363).
+ ///
+ /// Only the goals the config keeps per profile (see `ConfigDataSource`):
+-/// the kcal adjustment, the macro split, the per-meal kcal shares and the
+-/// daily water goal. Device-wide preferences (theme, language, units,
++/// the kcal adjustment, the macro split, the custom macro goals in grams,
++/// the per-meal kcal shares and the daily water goal. Device-wide preferences (theme, language, units,
+ /// notifications, consents) and the health-import state are left out; see
+ /// `docs/export-format.md` for why. Per-nutrient goals are not here either:
+ /// they are stored on each tracked day and travel in
+@@ -28,6 +28,7 @@ class GoalSettingsBackup {
+   static const _mealShareSumTolerance = 2;
+   static const minDailyWaterGoalMl = 100;
+   static const maxDailyWaterGoalMl = 10000;
++  static const maxMacroGoalGrams = 2000.0;
+ 
+   static const _mealKeys = [
+     ConfigEntity.mealKeyBreakfast,
+@@ -42,6 +43,9 @@ class GoalSettingsBackup {
+   final double? fatGoalPct;
+   final Map<String, int>? mealKcalSharesPct;
+   final int? dailyWaterGoalMl;
++  final double? carbGoalGrams;
++  final double? proteinGoalGrams;
++  final double? fatGoalGrams;
+ 
+   const GoalSettingsBackup({
+     this.kcalAdjustment,
+@@ -50,6 +54,9 @@ class GoalSettingsBackup {
+     this.fatGoalPct,
+     this.mealKcalSharesPct,
+     this.dailyWaterGoalMl,
++    this.carbGoalGrams,
++    this.proteinGoalGrams,
++    this.fatGoalGrams,
+   });
+ 
+   /// The goals stored in [config], with any value [fromJson] would reject
+@@ -63,6 +70,12 @@ class GoalSettingsBackup {
+       config.userFatGoalPct,
+     ];
+     final macrosValid = _macroSplitError(macros) == null;
++    final grams = [
++      config.userCarbGoalGrams,
++      config.userProteinGoalGrams,
++      config.userFatGoalGrams,
++    ];
++    final gramsValid = _macroGramsError(grams) == null;
+     final shares = config.mealKcalSharesPct;
+     final water = config.dailyWaterGoalMl;
+     return GoalSettingsBackup(
+@@ -76,6 +89,9 @@ class GoalSettingsBackup {
+           ? {for (final k in _mealKeys) k: shares[k]!}
+           : null,
+       dailyWaterGoalMl: _waterGoalError(water) == null ? water : null,
++      carbGoalGrams: gramsValid ? grams[0] : null,
++      proteinGoalGrams: gramsValid ? grams[1] : null,
++      fatGoalGrams: gramsValid ? grams[2] : null,
+     );
+   }
+ 
+@@ -104,12 +120,18 @@ class GoalSettingsBackup {
+     ];
+     final shares = _optionalShares(json, 'mealKcalSharesPct');
+     final water = _optionalInt(json, 'dailyWaterGoalMl');
++    final grams = [
++      _optionalDouble(json, 'carbGoalGrams'),
++      _optionalDouble(json, 'proteinGoalGrams'),
++      _optionalDouble(json, 'fatGoalGrams'),
++    ];
+ 
+     final error =
+         _kcalAdjustmentError(kcal) ??
+         _macroSplitError(macros) ??
+         (shares == null ? null : _mealSharesError(shares)) ??
+-        _waterGoalError(water);
++        _waterGoalError(water) ??
++        _macroGramsError(grams);
+     if (error != null) throw FormatException(error);
+ 
+     return GoalSettingsBackup(
+@@ -121,6 +143,9 @@ class GoalSettingsBackup {
+           ? null
+           : {for (final k in _mealKeys) k: shares[k]!},
+       dailyWaterGoalMl: water,
++      carbGoalGrams: grams[0],
++      proteinGoalGrams: grams[1],
++      fatGoalGrams: grams[2],
+     );
+   }
+ 
+@@ -132,6 +157,9 @@ class GoalSettingsBackup {
+     'fatGoalPct': fatGoalPct,
+     'mealKcalSharesPct': mealKcalSharesPct,
+     'dailyWaterGoalMl': dailyWaterGoalMl,
++    'carbGoalGrams': carbGoalGrams,
++    'proteinGoalGrams': proteinGoalGrams,
++    'fatGoalGrams': fatGoalGrams,
+   };
+ 
+   static double? _optionalDouble(Map<String, dynamic> json, String key) {
+@@ -194,6 +222,19 @@ class GoalSettingsBackup {
+     return null;
+   }
+ 
++  /// The custom macro goals are set together, so it is all three or none.
++  static String? _macroGramsError(List<double?> grams) {
++    if (grams.every((g) => g == null)) return null;
++    if (grams.any((g) => g == null)) {
++      return 'the custom macro goals need carbs, protein and fat together';
++    }
++    if (grams.any((g) => !g!.isFinite || g < 0 || g > maxMacroGoalGrams)) {
++      return 'custom macro goals are grams between 0 and '
++          '$maxMacroGoalGrams, got $grams';
++    }
++    return null;
++  }
++
+   static String? _mealSharesError(Map<String, int> shares) {
+     if (!_mealKeys.every(shares.containsKey)) {
+       return 'mealKcalSharesPct needs all of $_mealKeys';
+diff --git a/lib/features/settings/domain/usecase/import_data_usecase.dart b/lib/features/settings/domain/usecase/import_data_usecase.dart
+index 33fe4e3..022a3a0 100644
+--- a/lib/features/settings/domain/usecase/import_data_usecase.dart
++++ b/lib/features/settings/domain/usecase/import_data_usecase.dart
+@@ -203,6 +203,9 @@ class ImportDataUsecase {
+           fatGoalPct: goalSettings.fatGoalPct,
+           mealKcalSharesPct: goalSettings.mealKcalSharesPct,
+           dailyWaterGoalMl: goalSettings.dailyWaterGoalMl,
++          carbGoalGrams: goalSettings.carbGoalGrams,
++          proteinGoalGrams: goalSettings.proteinGoalGrams,
++          fatGoalGrams: goalSettings.fatGoalGrams,
+         );
+       }
+ 
+diff --git a/lib/features/settings/presentation/bloc/settings_bloc.dart b/lib/features/settings/presentation/bloc/settings_bloc.dart
+index 9c033de..52087a7 100644
+--- a/lib/features/settings/presentation/bloc/settings_bloc.dart
++++ b/lib/features/settings/presentation/bloc/settings_bloc.dart
+@@ -82,6 +82,15 @@ class SettingsBloc extends Bloc<SettingsEvent, SettingsState> {
+           healthImportEnabled: userConfig.healthImportEnabled,
+           healthWorkoutKcalMultiplier: userConfig.healthWorkoutKcalMultiplier,
+           defaultToRawFoodUnits: userConfig.defaultToRawFoodUnits,
++          customCarbGoalGrams: userConfig.hasCustomMacroGoals
++              ? userConfig.userCarbGoalGrams
++              : null,
++          customProteinGoalGrams: userConfig.hasCustomMacroGoals
++              ? userConfig.userProteinGoalGrams
++              : null,
++          customFatGoalGrams: userConfig.hasCustomMacroGoals
++              ? userConfig.userFatGoalGrams
++              : null,
+         ),
+       );
+     });
+@@ -232,6 +241,46 @@ class SettingsBloc extends Bloc<SettingsEvent, SettingsState> {
+     );
+   }
+ 
++  /// The custom daily macro goals in grams, or null while the goals are
++  /// calculated from the profile.
++  Future<({double carbs, double protein, double fat})?>
++  getCustomMacroGoalGrams() async {
++    final config = await _getConfigUsecase.getConfig();
++    if (!config.hasCustomMacroGoals) return null;
++    return (
++      carbs: config.userCarbGoalGrams!,
++      protein: config.userProteinGoalGrams!,
++      fat: config.userFatGoalGrams!,
++    );
++  }
++
++  /// The macro goals in grams in effect before today's activities, i.e.
++  /// what the dashboard shows on a day with nothing logged. Lets the custom
++  /// macro dialog start from the numbers the user already sees.
++  Future<({double carbs, double protein, double fat})>
++  getBaseMacroGoalGrams() async {
++    final kcalGoal = await _getKcalGoalUsecase.getKcalGoal(
++      totalKcalActivitiesParam: 0,
++    );
++    return (
++      carbs: await _getMacroGoalUsecase.getCarbsGoal(kcalGoal),
++      protein: await _getMacroGoalUsecase.getProteinsGoal(kcalGoal),
++      fat: await _getMacroGoalUsecase.getFatsGoal(kcalGoal),
++    );
++  }
++
++  /// Stores custom daily macro goals in grams, or switches them off when
++  /// [grams] is null.
++  Future<void> setCustomMacroGoalGrams(
++    ({double carbs, double protein, double fat})? grams,
++  ) async {
++    await _addConfigUsecase.setConfigMacroGoalGrams(
++      carbGrams: grams?.carbs,
++      proteinGrams: grams?.protein,
++      fatGrams: grams?.fat,
++    );
++  }
++
+   // #150: per-meal kcal share configuration
+   Future<Map<String, int>> getMealKcalSharesPct() async {
+     final config = await _getConfigUsecase.getConfig();
+diff --git a/lib/features/settings/presentation/bloc/settings_state.dart b/lib/features/settings/presentation/bloc/settings_state.dart
+index beeeab4..397e7f4 100644
+--- a/lib/features/settings/presentation/bloc/settings_state.dart
++++ b/lib/features/settings/presentation/bloc/settings_state.dart
+@@ -51,6 +51,17 @@ class SettingsLoadedState extends SettingsState {
+   /// behaviour.
+   final bool defaultToRawFoodUnits;
+ 
++  /// The custom daily macro goals in grams; all null while the goals are
++  /// calculated from the profile.
++  final double? customCarbGoalGrams;
++  final double? customProteinGoalGrams;
++  final double? customFatGoalGrams;
++
++  bool get hasCustomMacroGoals =>
++      customCarbGoalGrams != null &&
++      customProteinGoalGrams != null &&
++      customFatGoalGrams != null;
++
+   const SettingsLoadedState(
+     this.versionNumber,
+     this.sendAnonymousData,
+@@ -77,6 +88,9 @@ class SettingsLoadedState extends SettingsState {
+     this.healthImportEnabled = false,
+     this.healthWorkoutKcalMultiplier,
+     this.defaultToRawFoodUnits = false,
++    this.customCarbGoalGrams,
++    this.customProteinGoalGrams,
++    this.customFatGoalGrams,
+   });
+ 
+   @override
+@@ -106,5 +120,8 @@ class SettingsLoadedState extends SettingsState {
+         healthImportEnabled,
+         healthWorkoutKcalMultiplier,
+         defaultToRawFoodUnits,
++        customCarbGoalGrams,
++        customProteinGoalGrams,
++        customFatGoalGrams,
+       ];
+ }
+diff --git a/lib/features/settings/presentation/widgets/custom_macro_goals_dialog.dart b/lib/features/settings/presentation/widgets/custom_macro_goals_dialog.dart
+new file mode 100644
+index 0000000..d7c912a
+--- /dev/null
++++ b/lib/features/settings/presentation/widgets/custom_macro_goals_dialog.dart
+@@ -0,0 +1,242 @@
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:opennutritracker/core/utils/calc/macro_calc.dart';
++import 'package:opennutritracker/core/utils/energy_display.dart';
++import 'package:opennutritracker/core/utils/reload_diary_and_trends.dart';
++import 'package:opennutritracker/features/home/presentation/bloc/home_bloc.dart';
++import 'package:opennutritracker/features/settings/presentation/bloc/settings_bloc.dart';
++import 'package:opennutritracker/generated/l10n.dart';
++
++/// Lets the user enter their own daily macro goals in grams instead of
++/// having them derived from the calculated kcal goal and the macro split.
++/// While on, the daily kcal goal is the energy the grams add up to (plus
++/// logged activity, as before) — see `GetKcalGoalUsecase`.
++class CustomMacroGoalsDialog extends StatefulWidget {
++  /// Upper bound for each macro field, in grams.
++  static const int maxMacroGrams = 1000;
++
++  final SettingsBloc settingsBloc;
++  final HomeBloc homeBloc;
++
++  const CustomMacroGoalsDialog({
++    super.key,
++    required this.settingsBloc,
++    required this.homeBloc,
++  });
++
++  @override
++  State<CustomMacroGoalsDialog> createState() => _CustomMacroGoalsDialogState();
++}
++
++class _CustomMacroGoalsDialogState extends State<CustomMacroGoalsDialog> {
++  bool _loaded = false;
++  bool _enabled = false;
++
++  late final TextEditingController _carbsController;
++  late final TextEditingController _fatController;
++  late final TextEditingController _proteinController;
++
++  @override
++  void initState() {
++    super.initState();
++    _carbsController = TextEditingController();
++    _fatController = TextEditingController();
++    _proteinController = TextEditingController();
++    _load();
++  }
++
++  @override
++  void dispose() {
++    _carbsController.dispose();
++    _fatController.dispose();
++    _proteinController.dispose();
++    super.dispose();
++  }
++
++  Future<void> _load() async {
++    final custom = await widget.settingsBloc.getCustomMacroGoalGrams();
++    // Off: start from the calculated goals the dashboard shows today, so
++    // switching on is a tweak of familiar numbers rather than a blank form.
++    final grams = custom ?? await widget.settingsBloc.getBaseMacroGoalGrams();
++    if (!mounted) return;
++    setState(() {
++      _enabled = custom != null;
++      _carbsController.text = grams.carbs.round().toString();
++      _fatController.text = grams.fat.round().toString();
++      _proteinController.text = grams.protein.round().toString();
++      _loaded = true;
++    });
++  }
++
++  int? _parse(TextEditingController controller) {
++    final value = int.tryParse(controller.text);
++    if (value == null || value < 0) return null;
++    return value > CustomMacroGoalsDialog.maxMacroGrams ? null : value;
++  }
++
++  /// The entered grams, or null when any field is empty, out of range, or
++  /// all three are zero (a 0 kcal goal).
++  ({double carbs, double protein, double fat})? get _grams {
++    final carbs = _parse(_carbsController);
++    final fat = _parse(_fatController);
++    final protein = _parse(_proteinController);
++    if (carbs == null || fat == null || protein == null) return null;
++    if (carbs + fat + protein == 0) return null;
++    return (
++      carbs: carbs.toDouble(),
++      protein: protein.toDouble(),
++      fat: fat.toDouble(),
++    );
++  }
++
++  Future<void> _save() async {
++    final grams = _grams;
++    if (_enabled && grams == null) return;
++    await widget.settingsBloc.setCustomMacroGoalGrams(_enabled ? grams : null);
++    widget.settingsBloc.add(LoadSettingsEvent());
++    widget.homeBloc.add(const LoadItemsEvent());
++    // Recompute today's stored goals so the diary reflects the change
++    // straight away instead of from tomorrow on.
++    await widget.settingsBloc.updateTrackedDay(
++      await widget.settingsBloc.getCurrentLogicalDay(),
++    );
++    reloadDiaryAndTrends();
++    if (!mounted) return;
++    Navigator.of(context).pop();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final s = S.of(context);
++    final grams = _grams;
++    final canSave = _loaded && (!_enabled || grams != null);
++    return AlertDialog(
++      title: Text(
++        s.settingsCustomMacroGoalsLabel,
++        maxLines: 2,
++        overflow: TextOverflow.ellipsis,
++      ),
++      content: !_loaded
++          ? const SizedBox(
++              height: 80,
++              child: Center(child: CircularProgressIndicator()),
++            )
++          : SingleChildScrollView(
++              child: Column(
++                mainAxisSize: MainAxisSize.min,
++                crossAxisAlignment: CrossAxisAlignment.stretch,
++                children: [
++                  Semantics(
++                    identifier: 'custom-macro-goals-switch',
++                    child: SwitchListTile(
++                      contentPadding: EdgeInsets.zero,
++                      title: Text(s.settingsCustomMacroGoalsSwitchLabel),
++                      value: _enabled,
++                      onChanged: (value) => setState(() => _enabled = value),
++                    ),
++                  ),
++                  Text(
++                    s.settingsCustomMacroGoalsDescription,
++                    style: Theme.of(context).textTheme.bodySmall,
++                  ),
++                  const SizedBox(height: 16),
++                  _gramsField(
++                    context,
++                    identifier: 'custom-macro-goals-carbs',
++                    label: s.carbsLabel,
++                    controller: _carbsController,
++                  ),
++                  const SizedBox(height: 12),
++                  _gramsField(
++                    context,
++                    identifier: 'custom-macro-goals-fat',
++                    label: s.fatLabel,
++                    controller: _fatController,
++                  ),
++                  const SizedBox(height: 12),
++                  _gramsField(
++                    context,
++                    identifier: 'custom-macro-goals-protein',
++                    label: s.proteinLabel,
++                    controller: _proteinController,
++                  ),
++                  const SizedBox(height: 16),
++                  if (_enabled && grams == null)
++                    Text(
++                      s.settingsCustomMacroGoalsInvalid(
++                        CustomMacroGoalsDialog.maxMacroGrams,
++                      ),
++                      style: TextStyle(
++                        color: Theme.of(context).colorScheme.error,
++                      ),
++                    )
++                  else if (_enabled)
++                    Row(
++                      children: [
++                        Expanded(
++                          child: Text(
++                            s.settingsCustomMacroGoalsTotalLabel,
++                            style: Theme.of(context).textTheme.titleMedium,
++                          ),
++                        ),
++                        Text(
++                          EnergyDisplay.formatWithUnit(
++                            context,
++                            MacroCalc.getKcalFromMacroGrams(
++                              carbsGrams: grams!.carbs,
++                              fatsGrams: grams.fat,
++                              proteinsGrams: grams.protein,
++                            ),
++                          ),
++                          style: Theme.of(context).textTheme.titleMedium
++                              ?.copyWith(
++                                color: Theme.of(context).colorScheme.primary,
++                                fontWeight: FontWeight.bold,
++                              ),
++                        ),
++                      ],
++                    ),
++                ],
++              ),
++            ),
++      actions: [
++        TextButton(
++          onPressed: () => Navigator.of(context).pop(),
++          child: Text(s.dialogCancelLabel),
++        ),
++        Semantics(
++          identifier: 'custom-macro-goals-save',
++          child: TextButton(
++            onPressed: canSave ? _save : null,
++            child: Text(s.dialogOKLabel),
++          ),
++        ),
++      ],
++    );
++  }
++
++  Widget _gramsField(
++    BuildContext context, {
++    required String identifier,
++    required String label,
++    required TextEditingController controller,
++  }) {
++    return Semantics(
++      identifier: identifier,
++      child: TextField(
++        controller: controller,
++        enabled: _enabled,
++        keyboardType: TextInputType.number,
++        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
++        textAlign: TextAlign.right,
++        decoration: InputDecoration(
++          labelText: label,
++          suffixText: S.of(context).gramUnit,
++          isDense: true,
++          border: const OutlineInputBorder(),
++        ),
++        onChanged: (_) => setState(() {}),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/settings/presentation/widgets/kcal_goal_info_screen.dart b/lib/features/settings/presentation/widgets/kcal_goal_info_screen.dart
+index ea81510..f34c968 100644
+--- a/lib/features/settings/presentation/widgets/kcal_goal_info_screen.dart
++++ b/lib/features/settings/presentation/widgets/kcal_goal_info_screen.dart
+@@ -69,24 +69,40 @@ class _KcalGoalInfoScreenState extends State<KcalGoalInfoScreen> {
+               vertical: Dimens.spacing16,
+             ),
+             children: [
+-              Text(
+-                l10n.kcalGoalInfoIntro,
+-                style: Theme.of(context).textTheme.bodyMedium,
+-              ),
+-              const SizedBox(height: Dimens.spacing16),
+-              _InputsCard(breakdown: breakdown),
+-              const SizedBox(height: Dimens.spacing12),
+-              _TdeeCard(breakdown: breakdown),
+-              const SizedBox(height: Dimens.spacing12),
+-              _AdjustmentCard(breakdown: breakdown),
+-              const SizedBox(height: Dimens.spacing12),
+-              _ManualAdjustmentCard(breakdown: breakdown),
+-              const SizedBox(height: Dimens.spacing12),
+-              _ActivityCard(breakdown: breakdown),
+-              const SizedBox(height: Dimens.spacing12),
+-              _ResultCard(breakdown: breakdown),
+-              const SizedBox(height: Dimens.spacing12),
+-              _MacroCard(breakdown: breakdown),
++              if (breakdown.usesCustomMacroGoals) ...[
++                // The TDEE steps play no part in a custom goal, so they
++                // are left out rather than shown with numbers that don't
++                // add up to the goal.
++                Text(
++                  l10n.kcalGoalInfoCustomMacrosIntro,
++                  style: Theme.of(context).textTheme.bodyMedium,
++                ),
++                const SizedBox(height: Dimens.spacing16),
++                _CustomMacroGoalsCard(breakdown: breakdown),
++                const SizedBox(height: Dimens.spacing12),
++                _ActivityCard(breakdown: breakdown),
++                const SizedBox(height: Dimens.spacing12),
++                _ResultCard(breakdown: breakdown),
++              ] else ...[
++                Text(
++                  l10n.kcalGoalInfoIntro,
++                  style: Theme.of(context).textTheme.bodyMedium,
++                ),
++                const SizedBox(height: Dimens.spacing16),
++                _InputsCard(breakdown: breakdown),
++                const SizedBox(height: Dimens.spacing12),
++                _TdeeCard(breakdown: breakdown),
++                const SizedBox(height: Dimens.spacing12),
++                _AdjustmentCard(breakdown: breakdown),
++                const SizedBox(height: Dimens.spacing12),
++                _ManualAdjustmentCard(breakdown: breakdown),
++                const SizedBox(height: Dimens.spacing12),
++                _ActivityCard(breakdown: breakdown),
++                const SizedBox(height: Dimens.spacing12),
++                _ResultCard(breakdown: breakdown),
++                const SizedBox(height: Dimens.spacing12),
++                _MacroCard(breakdown: breakdown),
++              ],
+               const SizedBox(height: Dimens.spacing16),
+               Text(
+                 l10n.kcalGoalInfoEstimateNote,
+@@ -388,18 +404,28 @@ class _ResultCard extends StatelessWidget {
+     return _SectionCard(
+       title: l10n.kcalGoalInfoResultSection,
+       children: [
+-        _ValueRow(
+-          label: l10n.kcalGoalInfoTdeeResultLabel,
+-          value: EnergyDisplay.formatWithUnit(context, breakdown.tdeeKcal),
+-        ),
+-        _ValueRow(
+-          label: l10n.kcalGoalInfoAppliedAdjustmentLabel,
+-          value: _signedEnergy(context, breakdown.effectiveAdjustmentKcal),
+-        ),
+-        _ValueRow(
+-          label: l10n.settingsKcalAdjustmentLabel,
+-          value: _signedEnergy(context, breakdown.manualKcalAdjustment),
+-        ),
++        if (breakdown.usesCustomMacroGoals)
++          _ValueRow(
++            label: l10n.kcalGoalInfoCustomMacrosSection,
++            value: EnergyDisplay.formatWithUnit(
++              context,
++              breakdown.customMacroGoalsKcal!,
++            ),
++          )
++        else ...[
++          _ValueRow(
++            label: l10n.kcalGoalInfoTdeeResultLabel,
++            value: EnergyDisplay.formatWithUnit(context, breakdown.tdeeKcal),
++          ),
++          _ValueRow(
++            label: l10n.kcalGoalInfoAppliedAdjustmentLabel,
++            value: _signedEnergy(context, breakdown.effectiveAdjustmentKcal),
++          ),
++          _ValueRow(
++            label: l10n.settingsKcalAdjustmentLabel,
++            value: _signedEnergy(context, breakdown.manualKcalAdjustment),
++          ),
++        ],
+         _ValueRow(
+           label: l10n.activityLabel,
+           value: _signedEnergy(context, breakdown.activityKcal),
+@@ -428,6 +454,54 @@ class _ResultCard extends StatelessWidget {
+   }
+ }
+ 
++/// The user's own macro goals in grams and the energy each provides.
++class _CustomMacroGoalsCard extends StatelessWidget {
++  final KcalGoalBreakdownEntity breakdown;
++
++  const _CustomMacroGoalsCard({required this.breakdown});
++
++  @override
++  Widget build(BuildContext context) {
++    final l10n = S.of(context);
++    // The gram goals include today's activity share; the custom grams are
++    // what is left after taking it back out.
++    final activity = breakdown.activityKcal;
++    final carbs =
++        breakdown.carbsGoalGrams - MacroCalc.getTotalCarbsGoal(activity);
++    final fats = breakdown.fatsGoalGrams - MacroCalc.getTotalFatsGoal(activity);
++    final proteins =
++        breakdown.proteinsGoalGrams - MacroCalc.getTotalProteinsGoal(activity);
++    return _SectionCard(
++      title: l10n.kcalGoalInfoCustomMacrosSection,
++      children: [
++        _FormulaText.raw(
++          text:
++              '${l10n.carbsLabel}: '
++              '${_line(carbs, MacroCalc.carbsKcalPerGram)}\n'
++              '${l10n.fatLabel}: '
++              '${_line(fats, MacroCalc.fatKcalPerGram)}\n'
++              '${l10n.proteinLabel}: '
++              '${_line(proteins, MacroCalc.proteinKcalPerGram)}',
++        ),
++        const Divider(height: Dimens.spacing20),
++        _ValueRow(
++          label: l10n.kcalGoalInfoCustomMacrosSection,
++          value: EnergyDisplay.formatWithUnit(
++            context,
++            breakdown.customMacroGoalsKcal!,
++          ),
++          emphasized: true,
++        ),
++      ],
++    );
++  }
++
++  String _line(double grams, double kcalPerGram) {
++    final density = kcalPerGram.toStringAsFixed(0);
++    return '${grams.round()} g × $density = ${(grams * kcalPerGram).round()}';
++  }
++}
++
+ /// How the calorie goal splits into carb / fat / protein gram targets.
+ class _MacroCard extends StatelessWidget {
+   final KcalGoalBreakdownEntity breakdown;
+diff --git a/lib/features/settings/settings_screen.dart b/lib/features/settings/settings_screen.dart
+index 549cca6..a951294 100644
+--- a/lib/features/settings/settings_screen.dart
++++ b/lib/features/settings/settings_screen.dart
+@@ -46,6 +46,7 @@ import 'package:package_info_plus/package_info_plus.dart';
+ import 'package:provider/provider.dart';
+ import 'package:sentry_flutter/sentry_flutter.dart';
+ import 'package:url_launcher/url_launcher.dart';
++import 'package:opennutritracker/features/settings/presentation/widgets/custom_macro_goals_dialog.dart';
+ import 'package:opennutritracker/features/settings/presentation/widgets/diary_day_boundary_dialog.dart';
+ import 'package:opennutritracker/features/settings/presentation/widgets/kcal_adjustment_dialog.dart';
+ import 'package:opennutritracker/features/settings/presentation/widgets/kcal_goal_info_screen.dart';
+@@ -315,6 +316,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
+                       ),
+                     ),
+                   ),
++                  _SettingsTile(
++                    identifier: 'settings-custom-macro-goals',
++                    palette: palette,
++                    icon: Icons.edit_note_rounded,
++                    title: S.of(context).settingsCustomMacroGoalsLabel,
++                    subtitle: state.hasCustomMacroGoals
++                        ? S
++                              .of(context)
++                              .settingsCustomMacroGoalsSummary(
++                                state.customCarbGoalGrams!.round(),
++                                state.customFatGoalGrams!.round(),
++                                state.customProteinGoalGrams!.round(),
++                              )
++                        : S.of(context).settingsCustomMacroGoalsOffSubtitle,
++                    onTap: () => _showCustomMacroGoalsDialog(context),
++                  ),
++                  // Both still open while custom macro goals are on, so a
++                  // value can be prepared for when they are switched off;
++                  // the subtitle says it has no effect meanwhile.
+                   _SettingsTile(
+                     identifier: 'settings-kcal-adjustment',
+                     palette: palette,
+@@ -322,6 +342,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
+                     title: state.usesKilojoules
+                         ? S.of(context).settingsKjAdjustmentLabel
+                         : S.of(context).settingsKcalAdjustmentLabel,
++                    subtitle: state.hasCustomMacroGoals
++                        ? S.of(context).settingsCustomMacroGoalsOverriddenSubtitle
++                        : null,
+                     onTap: () => _showKcalAdjustmentDialog(context),
+                   ),
+                   _SettingsTile(
+@@ -329,6 +352,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
+                     palette: palette,
+                     icon: Icons.pie_chart_rounded,
+                     title: S.of(context).settingsMacroSplitLabel,
++                    subtitle: state.hasCustomMacroGoals
++                        ? S.of(context).settingsCustomMacroGoalsOverriddenSubtitle
++                        : null,
+                     onTap: () => _showMacroSplitDialog(context),
+                   ),
+                   _SettingsTile(
+@@ -1013,6 +1039,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
+     );
+   }
+ 
++  void _showCustomMacroGoalsDialog(BuildContext context) {
++    showDialog(
++      context: context,
++      builder: (context) => CustomMacroGoalsDialog(
++        settingsBloc: _settingsBloc,
++        homeBloc: _homeBloc,
++      ),
++    );
++  }
++
+   void _showMacroSplitDialog(BuildContext context) {
+     showDialog(
+       context: context,
+diff --git a/lib/l10n/intl_en.arb b/lib/l10n/intl_en.arb
+index f8019f6..02a45b3 100644
+--- a/lib/l10n/intl_en.arb
++++ b/lib/l10n/intl_en.arb
+@@ -1059,6 +1059,36 @@
+   "settingsAccentHueDisabledHint": "Turn off system colours to choose a custom accent.",
+   "settingsAccentHueReset": "Reset",
+   "settingsMacroSplitLabel": "Macro split",
++  "settingsCustomMacroGoalsLabel": "Custom macro goals",
++  "settingsCustomMacroGoalsOffSubtitle": "Off — calculated from your profile",
++  "settingsCustomMacroGoalsSummary": "{carbs} g carbs · {fat} g fat · {protein} g protein",
++  "@settingsCustomMacroGoalsSummary": {
++    "placeholders": {
++      "carbs": {
++        "type": "int"
++      },
++      "fat": {
++        "type": "int"
++      },
++      "protein": {
++        "type": "int"
++      }
++    }
++  },
++  "settingsCustomMacroGoalsSwitchLabel": "Set my own daily macros",
++  "settingsCustomMacroGoalsDescription": "Enter how many grams of carbs, fat and protein you want each day. Your daily calorie goal becomes the energy they add up to, plus any activity you log. The calculated goal, the kcal adjustment and the macro split are not used while this is on.",
++  "settingsCustomMacroGoalsTotalLabel": "Daily goal",
++  "settingsCustomMacroGoalsInvalid": "Enter 0–{max} g for each macro, with at least one above 0.",
++  "@settingsCustomMacroGoalsInvalid": {
++    "placeholders": {
++      "max": {
++        "type": "int"
++      }
++    }
++  },
++  "settingsCustomMacroGoalsOverriddenSubtitle": "Not used while custom macro goals are on",
++  "kcalGoalInfoCustomMacrosIntro": "You set your own daily macro goals, so today's calorie goal is the energy they provide plus today's activity. Turn off Custom macro goals in Settings to go back to the calculated goal.",
++  "kcalGoalInfoCustomMacrosSection": "Your macro goals",
+   "settingsLicensesLabel": "Licenses",
+   "settingsMagnesiumGoalDescription": "Daily magnesium target in milligrams. Default varies by gender (400mg male, 310mg female, 355mg otherwise).",
+   "settingsMagnesiumGoalLabel": "Magnesium goal",
+diff --git a/test/features/settings/presentation/widgets/custom_macro_goals_dialog_test.dart b/test/features/settings/presentation/widgets/custom_macro_goals_dialog_test.dart
+new file mode 100644
+index 0000000..83f9802
+--- /dev/null
++++ b/test/features/settings/presentation/widgets/custom_macro_goals_dialog_test.dart
+@@ -0,0 +1,188 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:opennutritracker/core/utils/energy_unit_provider.dart';
++import 'package:opennutritracker/core/utils/locator.dart';
++import 'package:opennutritracker/features/home/presentation/bloc/home_bloc.dart';
++import 'package:opennutritracker/features/settings/presentation/bloc/settings_bloc.dart';
++import 'package:opennutritracker/features/settings/presentation/widgets/custom_macro_goals_dialog.dart';
++import 'package:opennutritracker/generated/l10n.dart';
++import 'package:provider/provider.dart';
++
++import '../../../../helpers/fake_reload_blocs.dart';
++import '../../../../helpers/test_l10n.dart';
++
++typedef _Grams = ({double carbs, double protein, double fat});
++
++class _FakeSettingsBloc extends Fake implements SettingsBloc {
++  final List<String> calls;
++  final _Grams? stored;
++  bool saved = false;
++  _Grams? savedGrams;
++
++  _FakeSettingsBloc(this.calls, {this.stored});
++
++  @override
++  Future<_Grams?> getCustomMacroGoalGrams() async => stored;
++
++  @override
++  Future<_Grams> getBaseMacroGoalGrams() async =>
++      (carbs: 375.4, protein: 93.6, fat: 69.4);
++
++  @override
++  Future<void> setCustomMacroGoalGrams(_Grams? grams) async {
++    saved = true;
++    savedGrams = grams;
++  }
++
++  @override
++  Future<DateTime> getCurrentLogicalDay() async => DateTime(2026, 10, 10);
++
++  @override
++  Future<void> updateTrackedDay(DateTime day) async {
++    await Future<void>.delayed(Duration.zero);
++    calls.add('updateTrackedDay');
++  }
++
++  @override
++  void add(SettingsEvent event) {}
++}
++
++class _FakeHomeBloc extends Fake implements HomeBloc {
++  @override
++  void add(HomeEvent event) {}
++}
++
++Future<void> _open(WidgetTester tester, _FakeSettingsBloc settingsBloc) async {
++  await tester.pumpWidget(
++    ChangeNotifierProvider(
++      create: (_) => EnergyUnitProvider(),
++      child: MaterialApp(
++        localizationsDelegates: const [S.delegate],
++        supportedLocales: S.supportedLocales,
++        home: Scaffold(
++          body: Builder(
++            builder: (context) => ElevatedButton(
++              onPressed: () => showDialog<void>(
++                context: context,
++                builder: (_) => CustomMacroGoalsDialog(
++                  settingsBloc: settingsBloc,
++                  homeBloc: _FakeHomeBloc(),
++                ),
++              ),
++              child: const Text('Open'),
++            ),
++          ),
++        ),
++      ),
++    ),
++  );
++  await tester.tap(find.text('Open'));
++  await tester.pumpAndSettle();
++}
++
++Finder _field(String identifier) => find.descendant(
++  of: find.bySemanticsIdentifier(identifier),
++  matching: find.byType(TextField),
++);
++
++void main() {
++  late ReloadRecorder recorder;
++
++  setUp(() {
++    recorder = ReloadRecorder()..register();
++  });
++
++  tearDown(() async => locator.reset());
++
++  testWidgets('starts off, pre-filled with the calculated goals', (
++    tester,
++  ) async {
++    final settingsBloc = _FakeSettingsBloc(recorder.log);
++    await _open(tester, settingsBloc);
++
++    final carbs = tester.widget<TextField>(_field('custom-macro-goals-carbs'));
++    expect(carbs.controller!.text, '375');
++    expect(carbs.enabled, isFalse);
++    expect(
++      tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
++      isFalse,
++    );
++  });
++
++  testWidgets('saves the typed grams and refreshes today\'s goals', (
++    tester,
++  ) async {
++    final settingsBloc = _FakeSettingsBloc(recorder.log);
++    await _open(tester, settingsBloc);
++
++    await tester.tap(find.byType(Switch));
++    await tester.pump();
++    await tester.enterText(_field('custom-macro-goals-carbs'), '200');
++    await tester.enterText(_field('custom-macro-goals-fat'), '70');
++    await tester.enterText(_field('custom-macro-goals-protein'), '150');
++    await tester.pump();
++
++    // 200 × 4 + 70 × 9 + 150 × 4
++    expect(find.text('2030 ${l10nEn.kcalLabel}'), findsOneWidget);
++
++    await tester.tap(find.text(l10nEn.dialogOKLabel));
++    await tester.pumpAndSettle();
++
++    expect(settingsBloc.savedGrams, (carbs: 200.0, protein: 150.0, fat: 70.0));
++    expect(recorder.log.first, 'updateTrackedDay');
++    expect(recorder.diaryReloaded, isTrue);
++    expect(recorder.trendsReloaded, isTrue);
++    expect(find.byType(CustomMacroGoalsDialog), findsNothing);
++  });
++
++  testWidgets('all-zero grams cannot be saved', (tester) async {
++    final settingsBloc = _FakeSettingsBloc(recorder.log);
++    await _open(tester, settingsBloc);
++
++    await tester.tap(find.byType(Switch));
++    await tester.pump();
++    for (final id in [
++      'custom-macro-goals-carbs',
++      'custom-macro-goals-fat',
++      'custom-macro-goals-protein',
++    ]) {
++      await tester.enterText(_field(id), '0');
++    }
++    await tester.pump();
++
++    expect(
++      find.text(
++        l10nEn.settingsCustomMacroGoalsInvalid(
++          CustomMacroGoalsDialog.maxMacroGrams,
++        ),
++      ),
++      findsOneWidget,
++    );
++    await tester.tap(find.text(l10nEn.dialogOKLabel));
++    await tester.pumpAndSettle();
++    expect(settingsBloc.saved, isFalse);
++  });
++
++  testWidgets('switching off clears the custom goals', (tester) async {
++    final settingsBloc = _FakeSettingsBloc(
++      recorder.log,
++      stored: (carbs: 200, protein: 150, fat: 70),
++    );
++    await _open(tester, settingsBloc);
++
++    expect(
++      tester
++          .widget<TextField>(_field('custom-macro-goals-fat'))
++          .controller!
++          .text,
++      '70',
++    );
++    await tester.tap(find.byType(Switch));
++    await tester.pump();
++    await tester.tap(find.text(l10nEn.dialogOKLabel));
++    await tester.pumpAndSettle();
++
++    expect(settingsBloc.saved, isTrue);
++    expect(settingsBloc.savedGrams, isNull);
++  });
++}
+diff --git a/test/features/settings/settings_screen_test.dart b/test/features/settings/settings_screen_test.dart
+index 011a6fe..6391681 100644
+--- a/test/features/settings/settings_screen_test.dart
++++ b/test/features/settings/settings_screen_test.dart
+@@ -288,6 +288,9 @@ void main() {
+       200,
+       scrollable: find.byType(Scrollable).first,
+     );
++    // As below: make sure the row is fully on screen before tapping it.
++    await tester.ensureVisible(languageTile);
++    await tester.pumpAndSettle();
+     await tester.tap(languageTile);
+     await tester.pumpAndSettle();
+ 
+@@ -334,6 +337,10 @@ void main() {
+       200,
+       scrollable: find.byType(Scrollable).first,
+     );
++    // scrollUntilVisible stops as soon as the row peeks in at the edge,
++    // where the tap can miss it; bring the whole row into view.
++    await tester.ensureVisible(tile);
++    await tester.pumpAndSettle();
+     await tester.tap(tile);
+     await tester.pumpAndSettle();
+ 
+diff --git a/test/unit_test/custom_macro_goals_test.dart b/test/unit_test/custom_macro_goals_test.dart
+new file mode 100644
+index 0000000..a07f35a
+--- /dev/null
++++ b/test/unit_test/custom_macro_goals_test.dart
+@@ -0,0 +1,252 @@
++import 'package:flutter_test/flutter_test.dart';
++import 'package:opennutritracker/core/data/dbo/config_dbo.dart';
++import 'package:opennutritracker/core/data/repository/config_repository.dart';
++import 'package:opennutritracker/core/data/repository/user_activity_repository.dart';
++import 'package:opennutritracker/core/data/repository/user_repository.dart';
++import 'package:opennutritracker/core/domain/entity/app_theme_entity.dart';
++import 'package:opennutritracker/core/domain/entity/config_entity.dart';
++import 'package:opennutritracker/core/domain/entity/user_activity_entity.dart';
++import 'package:opennutritracker/core/domain/entity/user_entity.dart';
++import 'package:opennutritracker/core/domain/entity/user_gender_entity.dart';
++import 'package:opennutritracker/core/domain/entity/user_pal_entity.dart';
++import 'package:opennutritracker/core/domain/entity/user_weight_goal_entity.dart';
++import 'package:opennutritracker/core/domain/usecase/get_kcal_goal_breakdown_usecase.dart';
++import 'package:opennutritracker/core/domain/usecase/get_kcal_goal_usecase.dart';
++import 'package:opennutritracker/core/domain/usecase/get_macro_goal_usecase.dart';
++import 'package:opennutritracker/core/utils/calc/calorie_goal_calc.dart';
++import 'package:opennutritracker/core/utils/calc/macro_calc.dart';
++import 'package:opennutritracker/features/settings/domain/goal_settings_backup.dart';
++
++import '../fixture/physical_activity_entity_fixtures.dart';
++
++/// Custom daily macro goals in grams: while all three are set, the kcal
++/// goal is the energy they provide (plus activities) and the macro goals
++/// are the grams the user entered, instead of values derived from the
++/// profile.
++class _FakeUserRepository extends Fake implements UserRepository {
++  final UserEntity user;
++
++  _FakeUserRepository(this.user);
++
++  @override
++  Future<UserEntity> getUserData() async => user;
++}
++
++class _FakeConfigRepository extends Fake implements ConfigRepository {
++  final ConfigEntity config;
++
++  _FakeConfigRepository(this.config);
++
++  @override
++  Future<ConfigEntity> getConfig() async => config;
++}
++
++class _FakeUserActivityRepository extends Fake
++    implements UserActivityRepository {
++  final List<UserActivityEntity> activities;
++
++  _FakeUserActivityRepository(this.activities);
++
++  @override
++  Future<List<UserActivityEntity>> getAllUserActivityByDate(
++    DateTime dateTime, {
++    int dayStartOffsetHours = 0,
++    int dayStartOffsetMinutes = 0,
++  }) async => activities;
++}
++
++ConfigEntity _config({
++  double? carbs,
++  double? protein,
++  double? fat,
++  double? kcalAdjustment = 250,
++}) => ConfigEntity(
++  false,
++  false,
++  false,
++  AppThemeEntity.system,
++  userKcalAdjustment: kcalAdjustment,
++  userCarbGoalPct: 0.5,
++  userProteinGoalPct: 0.2,
++  userFatGoalPct: 0.3,
++  userCarbGoalGrams: carbs,
++  userProteinGoalGrams: protein,
++  userFatGoalGrams: fat,
++);
++
++void main() {
++  final now = DateTime.now();
++  final yesterday = now.subtract(const Duration(days: 1));
++  final user = UserEntity(
++    birthday: DateTime(yesterday.year - 30, yesterday.month, yesterday.day),
++    heightCM: 180.0,
++    weightKG: 80.0,
++    gender: UserGenderEntity.male,
++    goal: UserWeightGoalEntity.maintainWeight,
++    pal: UserPALEntity.active,
++  );
++
++  // 200 g carbs, 150 g protein, 70 g fat = 800 + 600 + 630 = 2030 kcal.
++  final custom = _config(carbs: 200, protein: 150, fat: 70);
++  const customKcal = 2030.0;
++
++  ({
++    GetKcalGoalUsecase kcal,
++    GetMacroGoalUsecase macro,
++    GetKcalGoalBreakdownUsecase breakdown,
++  })
++  usecases(
++    ConfigEntity config, [
++    List<UserActivityEntity> activities = const [],
++  ]) {
++    final userRepo = _FakeUserRepository(user);
++    final configRepo = _FakeConfigRepository(config);
++    final activityRepo = _FakeUserActivityRepository(activities);
++    return (
++      kcal: GetKcalGoalUsecase(userRepo, configRepo, activityRepo),
++      macro: GetMacroGoalUsecase(configRepo),
++      breakdown: GetKcalGoalBreakdownUsecase(
++        userRepo,
++        configRepo,
++        activityRepo,
++      ),
++    );
++  }
++
++  group('ConfigEntity.hasCustomMacroGoals', () {
++    test('is on only when all three grams are set', () {
++      expect(custom.hasCustomMacroGoals, isTrue);
++      expect(custom.customMacroGoalsKcal, customKcal);
++      expect(_config().hasCustomMacroGoals, isFalse);
++      expect(_config(carbs: 200, protein: 150).hasCustomMacroGoals, isFalse);
++    });
++
++    test('is off for values that would make a broken goal', () {
++      expect(
++        _config(carbs: 0, protein: 0, fat: 0).hasCustomMacroGoals,
++        isFalse,
++      );
++      expect(
++        _config(carbs: -10, protein: 150, fat: 70).hasCustomMacroGoals,
++        isFalse,
++      );
++      expect(
++        _config(carbs: double.nan, protein: 150, fat: 70).hasCustomMacroGoals,
++        isFalse,
++      );
++    });
++  });
++
++  test('without custom grams the goals are calculated as before', () async {
++    final u = usecases(_config());
++    final kcal = await u.kcal.getKcalGoal();
++
++    expect(
++      kcal,
++      CalorieGoalCalc.getTotalKcalGoal(user, 0, kcalUserAdjustment: 250),
++    );
++    expect(await u.macro.getCarbsGoal(kcal), kcal * 0.5 / 4);
++  });
++
++  test('custom grams replace the calculated kcal and macro goals', () async {
++    final u = usecases(custom);
++    final kcal = await u.kcal.getKcalGoal();
++
++    // The kcal adjustment and the split no longer apply.
++    expect(kcal, customKcal);
++    expect(await u.macro.getCarbsGoal(kcal), 200);
++    expect(await u.macro.getProteinsGoal(kcal), 150);
++    expect(await u.macro.getFatsGoal(kcal), 70);
++  });
++
++  test('activities still add to a custom goal', () async {
++    final activities = [
++      UserActivityEntity(
++        'a1',
++        45,
++        400,
++        now,
++        PhysicalActivityFixtures.moderateBicycling,
++      ),
++    ];
++    final u = usecases(custom, activities);
++    final kcal = await u.kcal.getKcalGoal();
++
++    expect(kcal, customKcal + 400);
++    // The burned kcal is split the default way, as a logged activity adds
++    // to a tracked day, on top of the user's own grams.
++    expect(
++      await u.macro.getCarbsGoal(kcal),
++      closeTo(200 + MacroCalc.getTotalCarbsGoal(400), 1e-9),
++    );
++    expect(
++      await u.macro.getFatsGoal(kcal),
++      closeTo(70 + MacroCalc.getTotalFatsGoal(400), 1e-9),
++    );
++    expect(
++      await u.macro.getProteinsGoal(kcal),
++      closeTo(150 + MacroCalc.getTotalProteinsGoal(400), 1e-9),
++    );
++
++    final breakdown = await u.breakdown.getBreakdown();
++    expect(breakdown.usesCustomMacroGoals, isTrue);
++    expect(breakdown.customMacroGoalsKcal, customKcal);
++    expect(breakdown.totalKcalGoal, kcal);
++    expect(breakdown.carbsGoalGrams, await u.macro.getCarbsGoal(kcal));
++    expect(breakdown.fatsGoalGrams, await u.macro.getFatsGoal(kcal));
++    expect(breakdown.proteinsGoalGrams, await u.macro.getProteinsGoal(kcal));
++    expect(
++      breakdown.carbsFractionGoal +
++          breakdown.fatsFractionGoal +
++          breakdown.proteinsFractionGoal,
++      closeTo(1, 1e-9),
++    );
++  });
++
++  test('a calculated breakdown does not report custom goals', () async {
++    final breakdown = await usecases(_config()).breakdown.getBreakdown();
++
++    expect(breakdown.usesCustomMacroGoals, isFalse);
++    expect(breakdown.customMacroGoalsKcal, isNull);
++  });
++
++  group('GoalSettingsBackup custom macro grams', () {
++    test('round-trip through JSON', () {
++      final config = ConfigDBO.empty()
++        ..userCarbGoalGrams = 200
++        ..userProteinGoalGrams = 150
++        ..userFatGoalGrams = 70;
++      final restored = GoalSettingsBackup.fromJson(
++        GoalSettingsBackup.fromConfigDBO(config).toJson(),
++      )!;
++
++      expect(restored.carbGoalGrams, 200);
++      expect(restored.proteinGoalGrams, 150);
++      expect(restored.fatGoalGrams, 70);
++    });
++
++    test('an older backup without them restores calculated goals', () {
++      final restored = GoalSettingsBackup.fromJson({'version': 1})!;
++
++      expect(restored.carbGoalGrams, isNull);
++      expect(restored.proteinGoalGrams, isNull);
++      expect(restored.fatGoalGrams, isNull);
++    });
++
++    test('rejects a partial or out-of-range set', () {
++      expect(
++        () => GoalSettingsBackup.fromJson({'version': 1, 'carbGoalGrams': 200}),
++        throwsFormatException,
++      );
++      expect(
++        () => GoalSettingsBackup.fromJson({
++          'version': 1,
++          'carbGoalGrams': 200,
++          'proteinGoalGrams': -1,
++          'fatGoalGrams': 70,
++        }),
++        throwsFormatException,
++      );
++    });
++  });
++}
+diff --git a/test/unit_test/favourite_export_import_test.dart b/test/unit_test/favourite_export_import_test.dart
+index bdf6a1e..63fd367 100644
+--- a/test/unit_test/favourite_export_import_test.dart
++++ b/test/unit_test/favourite_export_import_test.dart
+@@ -169,6 +169,9 @@ class _EmptyConfigRepository extends ConfigRepository {
+     required double? fatGoalPct,
+     required Map<String, int>? mealKcalSharesPct,
+     required int? dailyWaterGoalMl,
++    double? carbGoalGrams,
++    double? proteinGoalGrams,
++    double? fatGoalGrams,
+   }) async {}
+ }
+ 
+diff --git a/test/unit_test/import_goal_settings_test.dart b/test/unit_test/import_goal_settings_test.dart
+index f291ab5..510af14 100644
+--- a/test/unit_test/import_goal_settings_test.dart
++++ b/test/unit_test/import_goal_settings_test.dart
+@@ -755,6 +755,9 @@ void main() {
+         'fatGoalPct',
+         'mealKcalSharesPct',
+         'dailyWaterGoalMl',
++        'carbGoalGrams',
++        'proteinGoalGrams',
++        'fatGoalGrams',
+       });
+     });
+   });
