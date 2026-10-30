@@ -1,15 +1,22 @@
-# OpenNutriTracker – custom macro goals build
+# OpenNutriTracker – custom goals build
 
 An Android build of [OpenNutriTracker](https://github.com/simonoppowa/OpenNutriTracker)
-with one addition: **Settings → Goals → Custom macro goals**, where you enter your
-own daily grams of carbs, fat and protein instead of having them calculated.
+with two additions under **Settings → Goals**:
+
+- **Custom calorie goal** – enter your own daily calories instead of the
+  calculated goal. Your macros are split from it by the macro split.
+- **Custom macro goals** – enter your own daily grams of carbs, fat and
+  protein; your calorie goal becomes what they add up to. This takes
+  precedence over a custom calorie goal.
+
+Logged activity still adds to either goal.
 
 ## Install
 
 1. On your Android phone, download
    **[OpenNutriTracker-custom-macros-arm64.apk](https://github.com/Hiamf0/ont-custom-build/raw/main/OpenNutriTracker-custom-macros-arm64.apk)**.
 2. Open the downloaded file. If asked, allow your browser to install unknown apps.
-3. Tap **Install**. The app appears as **ONT Develop** and can sit alongside the
+3. Tap **Install** (or **Update** if you have an earlier build). The app appears as **ONT Develop** and can sit alongside the
    official OpenNutriTracker app.
 
 ## Notes
